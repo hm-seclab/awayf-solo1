@@ -162,13 +162,16 @@ uint8_t ctap_get_info(CborEncoder * encoder)
         ret = cbor_encode_uint(&map, RESP_extensions);
         check_ret(ret);
         {
-            ret = cbor_encoder_create_array(&map, &array, 2);
+            ret = cbor_encoder_create_array(&map, &array, 3);
             check_ret(ret);
             {
                 ret = cbor_encode_text_stringz(&array, "credProtect");
                 check_ret(ret);
 
                 ret = cbor_encode_text_stringz(&array, "hmac-secret");
+                check_ret(ret);
+
+                ret = cbor_encode_text_stringz(&array, "federationId");
                 check_ret(ret);
             }
             ret = cbor_encoder_close_container(&map, &array);
@@ -535,6 +538,10 @@ static int ctap_make_extensions(CTAP_extensions * ext, uint8_t * ext_encoder_buf
         }
     }
 
+    if (ext->idpId_valid) {
+        extensions_used += 1;
+    }
+
     if (extensions_used > 0)
     {
 
@@ -568,6 +575,16 @@ static int ctap_make_extensions(CTAP_extensions * ext, uint8_t * ext_encoder_buf
                     check_ret(ret);
 
                     ret = cbor_encode_boolean(&extension_output_map, 1);
+                    check_ret(ret);
+                }
+            }
+            if (ext->idpId_valid) {
+                {
+                    ret = cbor_encode_text_stringz(&extension_output_map, "idpId");
+                    check_ret(ret);
+
+                    //Set the response message
+                    ret = cbor_encode_text_stringz(&extension_output_map, (const char*)ext->idpId);
                     check_ret(ret);
                 }
             }

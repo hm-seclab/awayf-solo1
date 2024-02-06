@@ -254,6 +254,9 @@ typedef struct
     uint8_t hmac_secret_present;
     CTAP_hmac_secret hmac_secret;
     uint32_t cred_protect;
+
+    uint8_t idpId_valid;
+    uint8_t idpId[32];
 } CTAP_extensions;
 
 typedef struct

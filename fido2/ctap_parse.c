@@ -706,6 +706,22 @@ uint8_t ctap_parse_extensions(CborValue * val, CTAP_extensions * ext)
                 printf1(TAG_RED, "warning: credProtect request ignored for being wrong type\r\n");
             }
         }
+        else if (strncmp(key, "idpId",5) == 0) {
+            if (cbor_value_get_type(&map) == CborTextStringType)
+            { 
+                uint8_t idpId[32];
+                sz = sizeof(idpId);
+                ret = cbor_value_copy_text_string(&map, (char *)idpId, &sz, NULL);
+                check_ret(ret);
+                ext->idpId_valid = 0x01;
+                strcpy((char *)ext->idpId, idpId);
+                // we use strcpy??? are we stupid???
+            }
+            else
+            {
+                printf1(TAG_RED, "warning: federationId request ignored for being wrong type\r\n");
+            }
+        }
 
         ret = cbor_value_advance(&map);
         check_ret(ret);
