@@ -27,6 +27,8 @@
 #include "device.h"
 #include "data_migration.h"
 
+#include "awayf.h"
+
 uint8_t PIN_TOKEN[PIN_TOKEN_SIZE];
 uint8_t KEY_AGREEMENT_PUB[64];
 static uint8_t KEY_AGREEMENT_PRIV[32];
@@ -2323,6 +2325,7 @@ uint8_t ctap_request(uint8_t * pkt_raw, int length, CTAP_RESPONSE * resp)
         case CTAP_GET_ASSERTION:
         case CTAP_CBOR_CRED_MGMT:
         case CTAP_CBOR_CRED_MGMT_PRE:
+        case CTAP_CBOR_FEDERATION_ID:
             if (ctap_device_locked())
             {
                 status = CTAP2_ERR_PIN_BLOCKED;
@@ -2408,6 +2411,14 @@ uint8_t ctap_request(uint8_t * pkt_raw, int length, CTAP_RESPONSE * resp)
         case CTAP_CBOR_CRED_MGMT_PRE:
             printf1(TAG_CTAP,"CTAP_CBOR_CRED_MGMT_PRE\n");
             status = ctap_cred_mgmt(&encoder, pkt_raw, length);
+
+            resp->length = cbor_encoder_get_buffer_size(&encoder, buf);
+
+            dump_hex1(TAG_DUMP,buf, resp->length);
+            break;
+        case CTAP_CBOR_FEDERATION_ID:
+            printf1(TAG_CTAP,"CTAP_CBOR_FEDERATION_ID\n");
+            status = ctap_fed_mgmt(&encoder, pkt_raw, length);
 
             resp->length = cbor_encoder_get_buffer_size(&encoder, buf);
 
@@ -2744,4 +2755,190 @@ void lock_device_permanently() {
     printf1(TAG_CP, "Device locked!\n");
 
     authenticator_write_state(&STATE);
+}
+
+// +++++++++++++++++++++++++++++++++++++++++++
+// A-WAYF
+// +++++++++++++++++++++++++++++++++++++++++++
+
+uint8_t
+ctap_parse_fed_mgmt(CTAP_fedMgmt * FM, uint8_t * request, int length)
+{
+    int ret;
+    unsigned int i;
+    int key;
+    size_t map_length;
+    CborParser parser;
+    CborValue it,map;
+
+    memset(FM, 0, sizeof(CTAP_fedMgmt));
+    ret = cbor_parser_init(request, length, CborValidateCanonicalFormat, &parser, &it);
+    check_ret(ret);
+
+    CborType type = cbor_value_get_type(&it);
+    if (type != CborMapType)
+    {
+        printf2(TAG_ERR,"Error, expecting cbor map\n");
+        return CTAP2_ERR_INVALID_CBOR_TYPE;
+    }
+
+    ret = cbor_value_enter_container(&it,&map);
+    check_ret(ret);
+
+    ret = cbor_value_get_map_length(&it, &map_length);
+    check_ret(ret);
+
+    printf1(TAG_PARSE, "CM map has %d elements\n", map_length);
+       
+    for (i = 0; i < map_length; i++)
+    {
+        type = cbor_value_get_type(&map);
+        if (type != CborIntegerType)
+        {
+            printf2(TAG_ERR,"Error, expecting int for map key\n");
+            return CTAP2_ERR_INVALID_CBOR_TYPE;
+        }
+        ret = cbor_value_get_int_checked(&map, &key);
+        check_ret(ret);
+
+        ret = cbor_value_advance(&map);
+        check_ret(ret);
+
+        switch(key)
+        {
+            case FM_cmd:
+                printf1(TAG_PARSE, "FM_cmd\n");
+                if (cbor_value_get_type(&map) == CborIntegerType)
+                {
+                    ret = cbor_value_get_int_checked(&map, &FM->cmd);
+                    check_ret(ret);
+                    FM->hashed.cmd = FM->cmd;
+                }
+                else
+                {
+                    return CTAP2_ERR_INVALID_CBOR_TYPE;
+                }
+                break;
+            case FM_pinProtocol:
+                printf1(TAG_PARSE, "CM_pinProtocol\n");
+                if (cbor_value_get_type(&map) == CborIntegerType)
+                {
+                    ret = cbor_value_get_int_checked(&map, &FM->pinProtocol);
+                    check_ret(ret);
+                }
+                else
+                {
+                    return CTAP2_ERR_INVALID_CBOR_TYPE;
+                }
+                break;
+            case FM_pinAuth:
+                printf1(TAG_PARSE, "CM_pinAuth\n");
+                ret = parse_fixed_byte_string(&map, FM->pinAuth, 16);
+                check_retr(ret);
+                FM->pinAuthPresent = 1;
+                break;
+        }
+
+        ret = cbor_value_advance(&map);
+        check_ret(ret);
+    }
+
+    return 0;
+}
+
+uint8_t ctap_fed_mgmt_pinauth(CTAP_fedMgmt *FM)
+{
+    int8_t ret = verify_pin_auth_ex(FM->pinAuth, (uint8_t*)&FM->hashed, FM->subCommandParamsCborSize + 1);
+
+    if (ret == CTAP2_ERR_PIN_AUTH_INVALID)
+    {
+        ctap_decrement_pin_attempts();
+        if (ctap_device_boot_locked())
+        {
+            return CTAP2_ERR_PIN_AUTH_BLOCKED;
+        }
+        return CTAP2_ERR_PIN_AUTH_INVALID;
+    }
+    else
+    {
+        ctap_reset_pin_attempts();
+    }
+
+    return ret;
+}
+
+uint8_t ctap_cred_idp(CborEncoder * encoder, int rk_ind, int idp_count)
+{
+    CborEncoder map;
+    int ret = cbor_encoder_create_map(encoder, &map, 2);
+    check_ret(ret);
+    ret = cbor_encode_int(&map, 1);
+    check_ret(ret);
+    ret = cbor_encode_text_string(&map, "sso.hm.edu", 10);
+    check_ret(ret);
+    ret = cbor_encode_int(&map, 2);
+    check_ret(ret);
+    ret = cbor_encode_int(&map, 1);
+    check_ret(ret);
+    ret = cbor_encoder_close_container(encoder, &map);
+    check_ret(ret);
+    return 0;
+}
+
+uint8_t 
+ctap_fed_mgmt(CborEncoder * encoder, uint8_t * request, int length)
+{
+    CTAP_fedMgmt FM;
+    
+    static int curr_rk_ind = 0;
+    static bool rk_auth = false;
+    static int rk_count = 0;
+
+    int ret = ctap_parse_fed_mgmt(&FM, request, length);
+    if (ret != 0)
+    {
+        printf2(TAG_ERR,"error, ctap_parse_fed_mgmt failed\n");
+        return ret;
+    }
+
+    ret = ctap_fed_mgmt_pinauth(&FM);
+    check_retr(ret);
+
+    if (STATE.rk_stored == 0)
+    {
+        printf2(TAG_ERR,"No resident keys\n");
+        return 0;
+    }
+
+    if (FM.cmd == FM_cmdIdPBegin)
+    {
+        rk_auth = true;
+        
+    }
+    else if (FM.cmd == FM_cmdIdPNext)
+    {
+
+    }
+    else
+    {
+        rk_auth = false;
+        curr_rk_ind = -1;
+    }
+
+    switch (FM.cmd)
+    {
+        case FM_cmdIdPBegin:
+        case FM_cmdIdPNext:
+            printf1(TAG_CM, "Get RP %d\n", curr_rk_ind);
+            if (curr_rk_ind < 0 || !rk_auth) {
+                rk_auth = false;
+                return CTAP2_ERR_NO_CREDENTIALS;
+            }
+            ret = ctap_cred_idp(encoder, curr_rk_ind, rk_count);
+            check_ret(ret);
+            //curr_rp_ind = scan_for_next_rp(curr_rp_ind);
+            break;
+    }
+
+    return 0;
 }
